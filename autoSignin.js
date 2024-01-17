@@ -6,16 +6,20 @@ const axios = require('axios')
 const { initInstance, getEnv, updateCkEnv } = require('./qlApi.js')
 const notify = require('./sendNotify')
 
-const updateAccesssTokenURL = 'https://auth.aliyundrive.com/v2/account/token'
-const signinURL =
+const updateAccessTokenURL = 'https://auth.aliyundrive.com/v2/account/token'
+const signInURL =
   'https://member.aliyundrive.com/v1/activity/sign_in_list?_rx-s=mobile'
+
 const rewardURL =
   'https://member.aliyundrive.com/v1/activity/sign_in_reward?_rx-s=mobile'
-
+const rewardURLV2 =
+  'https://member.aliyundrive.com/v2/activity/sign_in_task_reward?_rx-s=mobile'
+const signInURLV2 =
+  'https://member.aliyundrive.com/v2/activity/sign_in_list?_rx-s=mobile'
 // 使用 refresh_token 更新 access_token
-function updateAccesssToken(queryBody, remarks) {
+function updateAccessToken(queryBody, remarks) {
   const errorMessage = [remarks, '更新 access_token 失败']
-  return axios(updateAccesssTokenURL, {
+  return axios(updateAccessTokenURL, {
     method: 'POST',
     data: queryBody,
     headers: { 'Content-Type': 'application/json' }
@@ -43,7 +47,7 @@ function updateAccesssToken(queryBody, remarks) {
 //签到列表
 function sign_in(access_token, remarks) {
   const sendMessage = [remarks]
-  return axios(signinURL, {
+  return axios(signInURL, {
     method: 'POST',
     data: {
       isReward: false
@@ -59,14 +63,11 @@ function sign_in(access_token, remarks) {
         sendMessage.push('签到失败', json.message)
         return Promise.reject(sendMessage.join(', '))
       }
-
       sendMessage.push('签到成功')
-
       const { signInLogs, signInCount } = json.result
+
       const currentSignInfo = signInLogs[signInCount - 1] // 当天签到信息
-
       sendMessage.push(`本月累计签到 ${signInCount} 天`)
-
       // 未领取奖励列表
       const rewards = signInLogs.filter(
         v => v.status === 'normal' && !v.isReward
@@ -102,8 +103,101 @@ function sign_in(access_token, remarks) {
       return Promise.reject(sendMessage.join(', '))
     })
 }
+function sign_inv2(access_token, remarks) {
+  const sendMessage = [remarks]
+  return axios(signInURLV2, {
+    method: 'POST',
+    data: {
+      isReward: false
+    },
+    headers: {
+      Authorization: access_token,
+      'Content-Type': 'application/json'
+    }
+  })
+    .then(d => d.data)
+    .then(async json => {
+      if (!json.success) {
+        sendMessage.push('签到失败', json.message)
+        return Promise.reject(sendMessage.join(', '))
+      }
+      sendMessage.push('签到成功')
+      const { signInInfos, signInCount } = json.result
+
+      const currentSignInfo = signInInfos[signInCount - 1] // 当天签到信息
+      const signInDay = currentSignInfo.day
+      sendMessage.push(`本月累计签到 ${signInCount} 天\n`)
+
+      for await (reward of currentSignInfo.rewards) {
+        if (reward.status == 'finished') {
+          if (reward.type == 'dailySignIn') {
+            try {
+              const rewardInfo = await getReward(access_token, signInDay)
+              sendMessage.push(
+                `第${signInDay}天奖励领取成功: 获得${rewardInfo.name || ''}${
+                  rewardInfo.description || ''
+                }`
+              )
+            } catch (e) {
+              sendMessage.push(`第${signInDay}天奖励领取失败:`, e)
+            }
+          } else if (reward.type == 'dailyTask') {
+            try {
+              const rewardInfo = await getRewardV2(access_token, signInDay)
+              sendMessage.push(
+                `第${signInDay}天奖励领取成功: 获得${
+                  rewardInfo.result.name || ''
+                }${rewardInfo.result.notice || ''}`
+              )
+            } catch (e) {
+              sendMessage.push(
+                `第${signInDay}天奖励领取失败:${reward.name || ''}`,
+                JSON.stringify(e.response.data)
+              )
+            }
+          }
+        } else if (reward.status == 'unfinished') {
+          sendMessage.push(
+            `第${signInDay}天未领取奖励: ${reward.name || ''} 任务未完成`
+          )
+        } else if (reward.status == 'end') {
+          sendMessage.push(
+            `第${signInDay}天未领取奖励: ${reward.name || ''} 任务已结束`
+          )
+        } else {
+          sendMessage.push(`今日签到获得${reward.name || ''}`)
+        }
+        sendMessage.push(`\n`)
+      }
+
+      return sendMessage.join(' ')
+    })
+    .catch(e => {
+      sendMessage.push('签到失败')
+      sendMessage.push(e.message)
+      return Promise.reject(sendMessage.join(', '))
+    })
+}
 
 // 领取奖励
+function getRewardV2(access_token, signInDay) {
+  return axios(rewardURLV2, {
+    method: 'POST',
+    data: { signInDay },
+    headers: {
+      authorization: access_token,
+      'Content-Type': 'application/json'
+    }
+  })
+    .then(d => d.data)
+    .then(json => {
+      if (!json.success) {
+        return Promise.reject(json.message)
+      }
+
+      return json.result
+    })
+}
 function getReward(access_token, signInDay) {
   return axios(rewardURL, {
     method: 'POST',
@@ -157,7 +251,6 @@ async function getRefreshToken() {
 
 !(async () => {
   const { instance, refreshTokenArray } = await getRefreshToken()
-
   const message = []
   let index = 1
   for await (refreshToken of refreshTokenArray) {
@@ -169,7 +262,7 @@ async function getRefreshToken() {
 
     try {
       const { nick_name, refresh_token, access_token } =
-        await updateAccesssToken(queryBody, remarks)
+        await updateAccessToken(queryBody, remarks)
 
       if (nick_name && nick_name !== remarks)
         remarks = `${nick_name}(${remarks})`
@@ -192,8 +285,7 @@ async function getRefreshToken() {
         await updateCkEnv(instance, params)
       }
 
-      const sendMessage = await sign_in(access_token, remarks)
-      console.log(sendMessage)
+      const sendMessage = await sign_inv2(access_token, remarks)
       console.log('\n')
       message.push(sendMessage)
     } catch (e) {
@@ -203,5 +295,6 @@ async function getRefreshToken() {
     }
     index++
   }
+
   await notify.sendNotify(`阿里云盘签到`, message.join('\n'))
 })()
